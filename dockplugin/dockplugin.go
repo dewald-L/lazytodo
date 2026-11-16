@@ -44,22 +44,56 @@ func (Plugin) Summary(ctx plugin.Context) (plugin.Summary, error) {
 	return summarize(st, time.Now()), nil
 }
 
+// summarize builds the home block: the four quadrants as a 2x2 matrix in
+// the order of the 1-4 keys (do now, schedule / delegate, drop), each cell
+// listing its open notes in the order the list shows them (due date, then
+// age; three rows for the top band, two for the bottom), and the unsorted inbox as a line below. Lines is the compact text
+// version for narrow or short terminals.
 func summarize(st *Store, now time.Time) plugin.Summary {
 	c := st.Counts()
-	overdue := 0
 	today := now.Format("2006-01-02")
-	for _, it := range st.Items {
-		if !it.Done && it.Due != "" && it.Due < today {
+	notes := map[int][]string{}
+	late := map[int]bool{}
+	overdue := 0
+	for _, it := range st.Visible("", false) {
+		text := it.Text
+		if it.Due != "" && it.Due < today {
 			overdue++
+			late[it.Quadrant] = true
+			text = "! " + text
 		}
+		notes[it.Quadrant] = append(notes[it.Quadrant], text)
 	}
+	cell := func(q int) plugin.Cell {
+		l := plugin.LevelNone
+		if late[q] {
+			l = plugin.LevelWarn
+		}
+		return plugin.Cell{Title: quadrantNames[q], Count: c[q], Lines: notes[q], Level: l}
+	}
+
 	line := fmt.Sprintf("%d do now · %d to sort", c[QDo], c[QInbox])
 	if overdue > 0 {
 		line += fmt.Sprintf(" · %d overdue", overdue)
 	}
-	s := plugin.Summary{Lines: []string{line}}
-	if v := st.Visible("", false); len(v) > 0 && v[0].Quadrant == QDo {
-		s.Lines = append(s.Lines, "next: "+v[0].Text)
+	s := plugin.Summary{Lines: []string{
+		line, fmt.Sprintf("%d schedule · %d delegate · %d drop", c[QSchedule], c[QDelegate], c[QDrop]),
+	}}
+	if n := notes[QDo]; len(n) > 0 {
+		s.Lines = append(s.Lines, "next: "+n[0])
+	}
+	s.Widgets = []plugin.Widget{
+		plugin.Columns(3, cell(QDo), cell(QSchedule)), // 4+3+1 rows: the whole budget
+		plugin.Columns(2, cell(QDelegate), cell(QDrop)),
+	}
+	if c[QInbox] > 0 || overdue > 0 {
+		tail := fmt.Sprintf("%d to sort", c[QInbox])
+		l := plugin.LevelNone
+		if overdue > 0 {
+			tail += fmt.Sprintf(" · %d overdue", overdue)
+			l = plugin.LevelWarn
+		}
+		s.Widgets = append(s.Widgets, plugin.Text(tail, l))
 	}
 	if overdue > 0 {
 		s.Level = plugin.LevelWarn

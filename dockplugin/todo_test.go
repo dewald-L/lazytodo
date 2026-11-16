@@ -116,3 +116,61 @@ func TestDoneDeleteSummary(t *testing.T) {
 		t.Fatal("not deleted")
 	}
 }
+
+func TestSummaryMatrix(t *testing.T) {
+	m, _ := newTest(t)
+	add := func(text string, q int, due string) { m.st.Add(Item{Text: text, Quadrant: q, Due: due}) }
+	add("late", QDo, "2026-11-01")
+	add("soon", QDo, "2026-11-20")
+	add("old undated", QDo, "")
+	add("dated first", QDo, "2026-11-14")
+	add("plan", QSchedule, "")
+	add("sort me", QInbox, "")
+	add("later", QDrop, "2026-12-01")
+	m.st.Add(Item{Text: "finished", Quadrant: QDo, Done: true})
+
+	s := summarize(m.st, day)
+	if s.Level != plugin.LevelWarn || len(s.Widgets) != 3 {
+		t.Fatalf("%+v", s)
+	}
+	top, bottom := s.Widgets[0], s.Widgets[1]
+	do, sched, del, drop := top.Cells[0], top.Cells[1], bottom.Cells[0], bottom.Cells[1]
+	if do.Title != "Do now" || sched.Title != "Schedule" || del.Title != "Delegate" || drop.Title != "Drop" {
+		t.Fatalf("quadrant order: %v %v %v %v", do.Title, sched.Title, del.Title, drop.Title)
+	}
+	// the list's order: due date first (the overdue one is marked), undated last, done left out
+	if got := strings.Join(do.Lines, "|"); got != "! late|dated first|soon|old undated" || do.Count != 4 || do.Level != plugin.LevelWarn {
+		t.Errorf("do now: %q count %d level %v", got, do.Count, do.Level)
+	}
+	if sched.Count != 1 || sched.Level != plugin.LevelNone || del.Count != 0 || len(del.Lines) != 0 || drop.Lines[0] != "later" {
+		t.Errorf("cells: %+v %+v %+v", sched, del, drop)
+	}
+	if tail := s.Widgets[2]; tail.Kind != plugin.KindText || tail.Text != "1 to sort · 1 overdue" || tail.Level != plugin.LevelWarn {
+		t.Errorf("tail: %+v", tail)
+	}
+	want := []string{"4 do now · 1 to sort · 1 overdue", "1 schedule · 0 delegate · 1 drop", "next: ! late"}
+	if strings.Join(s.Lines, "\n") != strings.Join(want, "\n") {
+		t.Errorf("fallback lines: %q", s.Lines)
+	}
+	// what the host sees: note text is user data, so Clean must keep it safe
+	m.st.Add(Item{Text: "\x1b[31mred\x07" + strings.Repeat("x", 500), Quadrant: QDelegate})
+	c := summarize(m.st, day).Clean()
+	if n := c.Widgets[1].Cells[0].Lines[0]; strings.ContainsAny(n, "\x1b\x07") || len([]rune(n)) != plugin.MaxWidgetLabel {
+		t.Errorf("note not cleaned: %q", n)
+	}
+	rows := 0
+	for _, w := range c.Widgets {
+		rows += w.Rows()
+	}
+	if rows != plugin.MaxSummaryRows || len(c.Widgets) != 3 {
+		t.Errorf("%d rows", rows)
+	}
+}
+
+func TestSummaryEmptyAndCalm(t *testing.T) {
+	m, _ := newTest(t)
+	s := summarize(m.st, day)
+	if s.Level != plugin.LevelNone || len(s.Widgets) != 2 || s.Lines[0] != "0 do now · 0 to sort" || len(s.Lines) != 2 {
+		t.Fatalf("empty store: %+v", s)
+	}
+}

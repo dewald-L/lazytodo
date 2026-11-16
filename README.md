@@ -33,4 +33,8 @@ Todos: `$XDG_DATA_HOME/dock/lazytodo/todos.json`. Optional settings in
 { "ask": ["quadrant", "who", "due"], "contexts": ["code", "people", "admin"] }
 ```
 
-The home screen shows `N do now · M to sort · K overdue`.
+The home screen shows your notes as a 2x2 matrix: **Do now** and **Schedule** on top,
+**Delegate** and **Drop** below, each with its count and top notes in list order (due
+date, then age; overdue ones start with `!` and turn the cell amber), plus a line for
+the unsorted inbox. On a narrow or short terminal it shows text instead:
+`N do now · M to sort · K overdue`, the other counts and the next note.
