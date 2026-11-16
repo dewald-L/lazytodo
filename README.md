@@ -19,8 +19,16 @@ go run . -dir ./tmp   # or run it standalone
 
 ## Keys
 
-`j k g G` move · `space` done · `0-4` set priority · `e` edit text · `E` edit all details ·
-`d` delete · `/` filter (text, context, person) · `h` show done · `?` help · `q` close.
+`j k g G` move · `h l` / `tab` switch quadrant · `space` done · `0-4` set priority · `e` edit text · `E` edit all details ·
+`d` delete · `/` filter (text, context, person) · `H` show done · `?` help · `q` close.
+
+The open plugin shows the same 2x2 matrix as bordered panes (Do now / Schedule on top,
+Delegate / Drop below) with the Inbox as a strip underneath. `j k g G` stay inside the
+focused pane (the one holding the selected note), `h l` jump to the pane beside it,
+`tab` / `shift+tab` cycle through all of them, and empty panes are skipped. A pane that
+overflows scrolls and shows `↓N` for the notes below. On a terminal under 48 columns or
+10 rows, or with nothing to show, it is the grouped list as before, where `h l` / `tab`
+step between groups.
 
 Due dates: `today`, `tom`, `fri`, `+3`, `+1w`, `12-24`, `2026-12-24`.
 

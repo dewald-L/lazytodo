@@ -40,6 +40,7 @@ type model struct {
 
 	vis      []*Item
 	sel, off int
+	poff     [5]int // per-quadrant scroll offsets of the grid view
 	showDone bool
 	filter   string
 
@@ -184,18 +185,26 @@ func (m *model) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, plugin.Close()
 	case "j", "down":
-		m.sel = min(m.sel+1, len(m.vis)-1)
+		m.move(1)
 	case "k", "up":
-		m.sel = max(m.sel-1, 0)
+		m.move(-1)
 	case "g", "home":
-		m.sel = 0
+		m.edge(false)
 	case "G", "end":
-		m.sel = max(len(m.vis)-1, 0)
+		m.edge(true)
+	case "h", "left":
+		m.pane(-1, false)
+	case "l", "right":
+		m.pane(1, false)
+	case "tab":
+		m.pane(1, true)
+	case "shift+tab":
+		m.pane(-1, true)
 	case "a":
 		return m, m.startAdd()
 	case "t":
 		return m, m.startTriage()
-	case "h":
+	case "H":
 		m.toggleDone()
 	case "?":
 		m.mode = mHelp
@@ -242,6 +251,113 @@ func (m *model) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// ---- grid navigation ----
+//
+// m.vis stays one list grouped by quadrant (groupOrder) and m.sel indexes it;
+// the grid is only another way to draw it. The focused pane is the selected
+// note's quadrant, so every editing key works the same in both layouts.
+
+// gridOrder is the reading order of the panes: the 2x2 matrix, then the inbox.
+var gridOrder = []int{QDo, QSchedule, QDelegate, QDrop, QInbox}
+
+// gridPartner is the pane beside q in the matrix (the inbox has none).
+var gridPartner = map[int]int{QDo: QSchedule, QSchedule: QDo, QDelegate: QDrop, QDrop: QDelegate}
+
+const (
+	minPaneW = 24 // each of the two matrix columns
+	minPaneH = 3  // border, border and one note row
+)
+
+// gridFits says whether the grid can be drawn in a body bh rows tall.
+func (m *model) gridFits(bh int) bool {
+	return len(m.vis) > 0 && m.w >= 2*minPaneW && bh >= 3*minPaneH
+}
+
+func (m *model) gridOn() bool { return m.gridFits(m.h - 1) }
+
+// span is the range m.vis[lo:hi] holding quadrant q's notes (they are contiguous).
+func (m *model) span(q int) (lo, hi int) {
+	lo = -1
+	for i, it := range m.vis {
+		if it.Quadrant == q {
+			if lo < 0 {
+				lo = i
+			}
+			hi = i + 1
+		}
+	}
+	return max(lo, 0), hi
+}
+
+func (m *model) move(d int) {
+	lo, hi := 0, len(m.vis)
+	if m.gridOn() && m.cur() != nil {
+		lo, hi = m.span(m.cur().Quadrant)
+	}
+	if hi > lo {
+		m.sel = max(min(m.sel+d, hi-1), lo)
+	}
+}
+
+// edge goes to the first or last note of the pane (or of the whole list).
+func (m *model) edge(end bool) {
+	lo, hi := 0, len(m.vis)
+	if m.gridOn() && m.cur() != nil {
+		lo, hi = m.span(m.cur().Quadrant)
+	}
+	m.sel = lo
+	if end && hi > lo {
+		m.sel = hi - 1
+	}
+}
+
+// pane moves to another quadrant, keeping the row where it can. In the grid
+// h/l go to the pane beside this one and tab/shift+tab cycle all of them; in
+// the list (cycle or not) they step to the previous or next group. Panes
+// with no notes are skipped.
+func (m *model) pane(d int, cycle bool) {
+	it := m.cur()
+	if it == nil {
+		return
+	}
+	order := groupOrder
+	if m.gridOn() {
+		if !cycle {
+			p, ok := gridPartner[it.Quadrant]
+			// h only leaves the right-hand pane, l the left-hand one
+			if ok && (p < it.Quadrant) == (d < 0) {
+				m.focus(p, it)
+			}
+			return
+		}
+		order = gridOrder
+	}
+	i := 0
+	for j, q := range order {
+		if q == it.Quadrant {
+			i = j
+		}
+	}
+	for n := 1; n < len(order); n++ {
+		if m.focus(order[((i+d*n)%len(order)+len(order))%len(order)], it) {
+			return
+		}
+	}
+}
+
+// focus selects the note in quadrant q on the same row as from (clamped);
+// false when q has no notes.
+func (m *model) focus(q int, from *Item) bool {
+	flo, _ := m.span(from.Quadrant)
+	row := m.sel - flo
+	lo, hi := m.span(q)
+	if hi <= lo {
+		return false
+	}
+	m.sel = lo + min(max(row, 0), hi-lo-1)
+	return true
 }
 
 func (m *model) toggleDone() {
@@ -524,6 +640,8 @@ func (m *model) View() string {
 	var lines []string
 	if m.mode == mHelp {
 		lines = m.helpLines()
+	} else if m.gridFits(bh) {
+		lines = m.gridLines(bh)
 	} else {
 		lines = m.bodyLines(bh)
 	}
@@ -627,7 +745,7 @@ func (m *model) bodyLines(bh int) []string {
 		if i == m.sel {
 			selLine = len(lines)
 		}
-		add(m.row(it, i == m.sel), false)
+		add(m.row(it, i == m.sel, m.w), false)
 	}
 	top := selLine
 	if selLine > 0 && isHdr[selLine-1] {
@@ -643,7 +761,7 @@ func (m *model) bodyLines(bh int) []string {
 	return lines[m.off:]
 }
 
-func (m *model) row(it *Item, selected bool) string {
+func (m *model) row(it *Item, selected bool, w int) string {
 	cursor, box := "  ", "[ ]"
 	if selected {
 		cursor = m.accent.Render("▸ ")
@@ -675,9 +793,9 @@ func (m *model) row(it *Item, selected bool) string {
 		metaS = "  " + strings.Join(meta, m.muted.Render(" · "))
 		metaW = 2 + ansi.StringWidth(strings.Join(plain, " · "))
 	}
-	tw := m.w - 6 - metaW
+	tw := w - 6 - metaW
 	if tw < 12 {
-		metaS, tw = "", m.w-6
+		metaS, tw = "", w-6
 	}
 	text := clip(it.Text, tw)
 	switch {
@@ -698,8 +816,10 @@ func (m *model) helpLines() []string {
 		{"e / E", "edit text / edit all details"},
 		{"d", "delete"},
 		{"/", "filter (text, context or person)"},
-		{"h", "show or hide done items"},
-		{"j k g G", "move"},
+		{"H", "show or hide done items"},
+		{"j k g G", "move (within a quadrant in the grid)"},
+		{"h l", "previous / next quadrant (beside it, in the grid)"},
+		{"tab", "next quadrant (shift+tab: previous)"},
 		{"q esc", "close"},
 	}
 	out := []string{m.accent.Render("Keys"), ""}
@@ -725,7 +845,7 @@ func (m *model) Help() []plugin.KeyHelp {
 		return []plugin.KeyHelp{{Key: "y", Desc: "delete"}, {Key: "n", Desc: "cancel"}}
 	}
 	return []plugin.KeyHelp{{Key: "a", Desc: "add"}, {Key: "t", Desc: "sort"}, {Key: "space", Desc: "done"},
-		{Key: "/", Desc: "filter"}, {Key: "?", Desc: "help"}}
+		{Key: "tab", Desc: "quadrant"}, {Key: "/", Desc: "filter"}, {Key: "?", Desc: "help"}}
 }
 
 func (m *model) Commands() []plugin.Command {
@@ -734,4 +854,92 @@ func (m *model) Commands() []plugin.Command {
 		{Name: "sort inbox", Desc: "triage unsorted todos", Msg: triageMsg{}},
 		{Name: "show done", Desc: "show or hide done todos", Msg: showDoneMsg{}},
 	}
+}
+
+// ---- grid view ----
+
+// gridLines draws the four quadrants as a 2x2 matrix of bordered panes
+// (do now, schedule / delegate, drop) with the inbox as a strip below, in a
+// body bh rows tall. The caller has checked gridFits.
+func (m *model) gridLines(bh int) []string {
+	focus := QInbox
+	if it := m.cur(); it != nil {
+		focus = it.Quadrant
+	}
+	strip := 2 + min(max(m.count(QInbox), 1), 3)
+	rest := bh - strip
+	// the bottom band is as tall as its fuller pane needs (at most half),
+	// so the more important top band gets the rest
+	bottom := min(rest/2, max(minPaneH, 2+max(m.count(QDelegate), m.count(QDrop))))
+	top := rest - bottom
+	lw, rw := (m.w+1)/2, m.w/2
+	var out []string
+	for _, band := range []struct{ l, r, h int }{{QDo, QSchedule, top}, {QDelegate, QDrop, bottom}} {
+		left := m.pane1(band.l, lw, band.h, focus == band.l)
+		right := m.pane1(band.r, rw, band.h, focus == band.r)
+		for i := range left {
+			out = append(out, left[i]+right[i])
+		}
+	}
+	return append(out, m.pane1(QInbox, m.w, strip, focus == QInbox)...)
+}
+
+// count is how many visible notes are in quadrant q.
+func (m *model) count(q int) int {
+	lo, hi := m.span(q)
+	return hi - lo
+}
+
+// pane1 draws quadrant q's notes in a bordered box w wide and h tall,
+// scrolled so the selected note shows when the pane is focused.
+func (m *model) pane1(q, w, h int, focused bool) []string {
+	bs := m.muted
+	if focused {
+		bs = m.accent
+	}
+	lo, hi := m.span(q)
+	n := hi - lo
+	if n == 0 {
+		lo, hi = 0, 0
+	}
+	inner := h - 2
+	off := min(m.poff[q], max(n-inner, 0))
+	if focused {
+		sel := m.sel - lo
+		off = min(max(off, sel-inner+1), sel)
+	}
+	off = max(off, 0)
+	m.poff[q] = off
+
+	title := m.accent.Render(quadrantNames[q]) + m.muted.Render(fmt.Sprintf(" %d", n))
+	if hint := quadrantHints[q]; hint != "" && w >= 44 {
+		title += m.muted.Render(" · " + hint)
+	}
+	tw := ansi.StringWidth(ansi.Strip(title))
+	title = ansi.Truncate(title, max(w-5, 1), "…")
+	tw = min(tw, max(w-5, 1))
+	dashes := func(k int) string { return strings.Repeat("─", max(k, 0)) }
+	out := []string{bs.Render("╭─ ") + title + bs.Render(" "+dashes(w-tw-5)+"╮")}
+
+	var rows []string
+	for i := off; i < n && len(rows) < inner; i++ {
+		it := m.vis[lo+i]
+		rows = append(rows, m.row(it, focused && lo+i == m.sel, w-4))
+	}
+	if n == 0 {
+		rows = []string{m.muted.Render("  —")}
+	}
+	for len(rows) < inner {
+		rows = append(rows, "")
+	}
+	for _, r := range rows {
+		r = ansi.Truncate(r, w-4, "…")
+		out = append(out, bs.Render("│")+" "+r+strings.Repeat(" ", max(w-4-ansi.StringWidth(r), 0))+" "+bs.Render("│"))
+	}
+	foot, fw := "", 0
+	if below := n - off - inner; below > 0 {
+		foot = fmt.Sprintf(" ↓%d ", below)
+		fw = ansi.StringWidth(foot)
+	}
+	return append(out, bs.Render("╰"+dashes(w-2-fw))+m.muted.Render(foot)+bs.Render("╯"))
 }
