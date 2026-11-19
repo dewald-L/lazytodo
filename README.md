@@ -19,7 +19,7 @@ go run . -dir ./tmp   # or run it standalone
 
 ## Keys
 
-`j k g G` move · `h l` / `tab` switch quadrant · `space` done · `0-4` set priority · `e` edit text · `E` edit all details ·
+`j k g G` move · `h l` / `tab` switch quadrant · `space` done · `[ ]` move todo between quadrants · `0-4` jump to quadrant (0 inbox) · `e` edit text · `E` edit all details ·
 `d` delete · `/` filter (text, context, person) · `H` show done · `?` help · `q` close.
 
 The open plugin shows the same 2x2 matrix as bordered panes (Do now / Schedule on top,

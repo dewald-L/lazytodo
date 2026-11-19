@@ -70,7 +70,7 @@ func TestBrainDumpAndTriage(t *testing.T) {
 	if len(m.st.Items) != 2 || m.mode != mList {
 		t.Fatalf("items=%d mode=%v", len(m.st.Items), m.mode)
 	}
-	press(m, "t", "1", "3") // first -> Do, second -> Delegate
+	press(m, "t", "]", "enter", "]", "]", "]", "enter") // first -> Do, second -> Delegate
 	if m.mode != mList || m.st.Items[0].Quadrant != QDo || m.st.Items[1].Quadrant != QDelegate {
 		t.Fatalf("triage failed: %+v %+v mode=%v", m.st.Items[0], m.st.Items[1], m.mode)
 	}
@@ -85,7 +85,7 @@ func TestGuidedAdd(t *testing.T) {
 	m, _ := newTest(t)
 	press(m, "a")
 	typ(m, "review PR")
-	press(m, "tab", "2", "1") // schedule, code
+	press(m, "tab", "]", "]", "enter", "1") // schedule, code
 	typ(m, "@ana")
 	press(m, "enter")
 	typ(m, "tom")
@@ -112,7 +112,10 @@ func TestDoneDeleteSummary(t *testing.T) {
 	if len(m.vis) != 1 {
 		t.Fatalf("done item still visible: %d", len(m.vis))
 	}
-	press(m, "d", "y")
+	if m.cur() != nil || m.fq != QDo { // focus stays on the now empty Do pane
+		t.Fatalf("focus left the emptied pane: fq=%d", m.fq)
+	}
+	press(m, "0", "d", "y")
 	if len(m.st.Items) != 1 {
 		t.Fatal("not deleted")
 	}
@@ -207,22 +210,21 @@ func frame(t *testing.T, m *model) string {
 func TestGridFrame(t *testing.T) {
 	m := gridModel(t, 50, 16)
 	want := `Todo · 9 open · 2 to sort (t)
-╭─ Do now 5 ────────────╮╭─ Schedule 1 ──────────╮
+╭─ 0 Inbox ──────────────────────────────────────╮
+│   [ ] in1                                      │
+│   [ ] in2                                      │
+╰────────────────────────────────────────────────╯
+╭─ 1 Do now ────────────╮╭─ 2 Schedule ──────────╮
 │ ▸ [ ] do1             ││   [ ] sch1            │
 │   [ ] do2             ││                       │
 │   [ ] do3             ││                       │
 │   [ ] do4             ││                       │
-│   [ ] do5             ││                       │
-│                       ││                       │
-╰───────────────────────╯╰───────────────────────╯
-╭─ Delegate 1 ──────────╮╭─ Drop 0 ──────────────╮
+╰─────────────────── ↓1 ╯╰───────────────────────╯
+╭─ 3 Delegate ──────────╮╭─ 4 Drop ──────────────╮
 │   [ ] del1            ││   —                   │
-╰───────────────────────╯╰───────────────────────╯
-╭─ Inbox 2 ──────────────────────────────────────╮
-│   [ ] in1                                      │
-│   [ ] in2                                      │
-╰────────────────────────────────────────────────╯
-`
+│                       ││                       │
+│                       ││                       │
+╰───────────────────────╯╰───────────────────────╯`
 	got := frame(t, m)
 	if strings.TrimRight(got, " \n") != strings.TrimRight(want, " \n") {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
@@ -265,8 +267,16 @@ func TestGridNavigation(t *testing.T) {
 		t.Fatalf("tab: %s", cur())
 	}
 	press(m, "tab")
+	if m.cur() != nil || m.fq != QDrop {
+		t.Fatalf("tab reaches the empty drop pane: fq=%d", m.fq)
+	}
+	press(m, "j", "k", "g", "G", "e", "d")
+	if m.mode != mList {
+		t.Fatalf("item keys do nothing in an empty pane: mode=%v", m.mode)
+	}
+	press(m, "tab")
 	if cur() != "in1" {
-		t.Fatalf("tab skips the empty drop pane: %s", cur())
+		t.Fatalf("tab: %s", cur())
 	}
 	press(m, "tab")
 	if cur() != "do1" {
@@ -333,5 +343,122 @@ func TestGridStates(t *testing.T) {
 	press(m, "G")
 	if v := frame(t, m); !strings.Contains(v, "▸ [ ] do5") {
 		t.Fatalf("selected note scrolled into view:\n%s", v)
+	}
+}
+
+func TestMoveAndJumpKeys(t *testing.T) {
+	m := gridModel(t, 80, 24)
+	press(m, "2")
+	if m.cur().Text != "sch1" {
+		t.Fatalf("2 jumps to schedule: %s", m.cur().Text)
+	}
+	press(m, "]")
+	if m.cur().Text != "sch1" || m.cur().Quadrant != QDelegate {
+		t.Fatalf("] moves to delegate: %+v", m.cur())
+	}
+	press(m, "0")
+	if m.cur().Quadrant != QInbox {
+		t.Fatalf("0 jumps to inbox: %+v", m.cur())
+	}
+}
+
+func TestEmptyPaneFocus(t *testing.T) {
+	m := gridModel(t, 80, 24)
+	press(m, "4") // drop is empty but focusable
+	if m.fq != QDrop || m.cur() != nil {
+		t.Fatalf("empty pane focus: fq=%d cur=%v", m.fq, m.cur())
+	}
+	press(m, "a")
+	typ(m, "unsorted")
+	press(m, "enter", "esc")
+	if it := m.cur(); it == nil || it.Quadrant != QInbox {
+		t.Fatalf("a adds to the inbox: %+v", it)
+	}
+}
+
+// Rebinding a panel key in paneKeys must move the behaviour, the panel title
+// and the help text together.
+func TestRebindingKeepsHintsAligned(t *testing.T) {
+	oldKeys, oldList := paneKeys, listKeys
+	defer func() { paneKeys, listKeys = oldKeys, oldList }()
+	paneKeys[QSchedule] = "s"
+	listKeys = buildListKeys()
+	m := gridModel(t, 80, 24)
+	press(m, "s")
+	if m.fq != QSchedule {
+		t.Fatalf("new key does not jump: fq=%d", m.fq)
+	}
+	press(m, "0")
+	press(m, "2")
+	if m.fq == QSchedule {
+		t.Fatal("old key still jumps")
+	}
+	if v := frame(t, m); !strings.Contains(v, "s Schedule") || strings.Contains(v, "2 Schedule") {
+		t.Fatalf("title not following the binding:\n%s", v)
+	}
+	if h := strings.Join(m.helpLines(), "\n"); !strings.Contains(ansi.Strip(h), "0 1 s 3 4") {
+		t.Fatalf("help not following the binding:\n%s", h)
+	}
+}
+
+func TestAddModal(t *testing.T) {
+	m := gridModel(t, 50, 16)
+	press(m, "a")
+	typ(m, "buy milk")
+	v := frame(t, m)
+	if !strings.Contains(v, "New todo") || !strings.Contains(v, "buy milk") || !strings.Contains(v, "│ ╰") {
+		t.Fatalf("no add modal:\n%s", v)
+	}
+	press(m, "enter")
+	if v := frame(t, m); !strings.Contains(v, "added: buy milk") {
+		t.Fatalf("modal stays open for the next todo:\n%s", v)
+	}
+	press(m, "esc")
+	if v := frame(t, m); strings.Contains(v, "New todo") {
+		t.Fatalf("esc closes the modal:\n%s", v)
+	}
+	press(m, "e") // editing keeps the footer prompt
+	if v := frame(t, m); strings.Contains(v, "New todo") || !strings.Contains(v, "edit:") {
+		t.Fatalf("edit is not a modal:\n%s", v)
+	}
+}
+
+func TestSortModal(t *testing.T) {
+	m := gridModel(t, 50, 16)
+	press(m, "t")
+	v := frame(t, m)
+	for _, want := range []string{"Sort 1/2", "in1", "Priority?", "1 Do now", "2 Schedule", "3 Delegate", "4 Drop", "0 inbox"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("sort modal lacks %q:\n%s", want, v)
+		}
+	}
+	press(m, "]", "enter")
+	if v := frame(t, m); !strings.Contains(v, "Sort 2/2") {
+		t.Fatalf("next todo:\n%s", v)
+	}
+	press(m, "esc")
+	if v := frame(t, m); strings.Contains(v, "Sort ") || m.mode != mList {
+		t.Fatalf("esc closes the modal:\n%s", v)
+	}
+}
+
+func TestSortWithNumbers(t *testing.T) {
+	m := gridModel(t, 50, 16)
+	press(m, "t", "3") // first inbox todo -> Delegate, then on to the next
+	press(m, "1")      // second -> Do now
+	if m.mode != mList {
+		t.Fatalf("triage not finished: mode=%v", m.mode)
+	}
+	for _, it := range m.st.Items {
+		switch it.Text {
+		case "in1":
+			if it.Quadrant != QDelegate {
+				t.Fatalf("in1: %d", it.Quadrant)
+			}
+		case "in2":
+			if it.Quadrant != QDo {
+				t.Fatalf("in2: %d", it.Quadrant)
+			}
+		}
 	}
 }

@@ -40,6 +40,8 @@ type model struct {
 
 	vis      []*Item
 	sel, off int
+	fq       int    // focused quadrant (grid); follows sel unless empty
+	empty    bool   // the focused quadrant has no notes, so nothing is selected
 	poff     [5]int // per-quadrant scroll offsets of the grid view
 	showDone bool
 	filter   string
@@ -78,6 +80,9 @@ func newModel(st *Store, cfg Config, th plugin.Theme) *model {
 func (m *model) Init() tea.Cmd { return nil }
 
 func (m *model) cur() *Item {
+	if m.empty && m.gridOn() {
+		return nil
+	}
 	if m.sel >= 0 && m.sel < len(m.vis) {
 		return m.vis[m.sel]
 	}
@@ -90,11 +95,28 @@ func (m *model) refresh(id int) {
 	m.vis = m.st.Visible(m.filter, m.showDone)
 	for i, it := range m.vis {
 		if it.ID == id {
-			m.sel = i
+			m.sel, m.empty, m.fq = i, false, it.Quadrant
 			return
 		}
 	}
 	m.sel = max(min(m.sel, len(m.vis)-1), 0)
+	if m.empty {
+		if lo, hi := m.span(m.fq); hi > lo {
+			m.sel, m.empty = lo, false
+		}
+		return
+	}
+	if it := m.cur(); it != nil {
+		m.fq = it.Quadrant
+	}
+}
+
+// keepPane leaves focus on quadrant q even if its last visible note just
+// went away (deleted, done), instead of jumping to another pane.
+func (m *model) keepPane(q int) {
+	if m.count(q) == 0 {
+		m.fq, m.empty = q, true
+	}
 }
 
 func (m *model) selID() int {
@@ -161,6 +183,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = mList
 			err := m.st.Delete(it.ID)
 			m.refresh(0)
+			m.keepPane(it.Quadrant)
 			return m, plugin.Error(err)
 		}
 		m.mode = mList
@@ -172,86 +195,156 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.keyList(k)
 }
 
-func (m *model) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	it := m.cur()
-	switch s := k.String(); s {
-	case "q":
-		return m, plugin.Close()
-	case "esc":
-		if m.filter != "" {
-			m.filter = ""
-			m.refresh(m.selID())
-			return m, nil
-		}
-		return m, plugin.Close()
-	case "j", "down":
-		m.move(1)
-	case "k", "up":
-		m.move(-1)
-	case "g", "home":
-		m.edge(false)
-	case "G", "end":
-		m.edge(true)
-	case "h", "left":
-		m.pane(-1, false)
-	case "l", "right":
-		m.pane(1, false)
-	case "tab":
-		m.pane(1, true)
-	case "shift+tab":
-		m.pane(-1, true)
-	case "a":
-		return m, m.startAdd()
-	case "t":
-		return m, m.startTriage()
-	case "H":
-		m.toggleDone()
-	case "?":
-		m.mode = mHelp
-	case "/":
-		m.mode = mFilter
-		m.ti.SetValue(m.filter)
-		m.ti.CursorEnd()
-		return m, m.ti.Focus()
-	case "e":
-		if it != nil {
+// ---- list view keys ----
+//
+// listKeys is the single place the list/grid view's keys are defined. The
+// key handler, the help overlay, the footer hints and the panel titles all
+// read from it (or from paneKeys / keyPrev / keyNext), so rebinding a key
+// here changes behaviour and hint together.
+
+// paneKeys is the key that jumps to each quadrant, indexed by quadrant.
+var paneKeys = [...]string{QInbox: "0", QDo: "1", QSchedule: "2", QDelegate: "3", QDrop: "4"}
+
+// keyPrev and keyNext move a todo to the previous / next quadrant, and
+// change the answer in the priority prompt.
+const keyPrev, keyNext = "[", "]"
+
+type binding struct {
+	keys  []string // as tea.KeyMsg.String() reports them; keys[0] is the one shown
+	desc  string   // help overlay text; consecutive bindings with the same desc share a row
+	short string   // footer hint; empty leaves it out of the footer
+	run   func(m *model, it *Item) tea.Cmd
+}
+
+// label is how the help overlay and hints name a binding's key.
+func (b binding) label() string {
+	if b.keys[0] == " " {
+		return "space"
+	}
+	return b.keys[0]
+}
+
+var listKeys = buildListKeys()
+
+func buildListKeys() []binding {
+	plain := func(f func(m *model)) func(*model, *Item) tea.Cmd {
+		return func(m *model, _ *Item) tea.Cmd { f(m); return nil }
+	}
+	bs := []binding{
+		{keys: []string{"a"}, desc: "add (enter saves and keeps going; tab asks details)", short: "add",
+			run: func(m *model, _ *Item) tea.Cmd { return m.startAdd() }},
+		{keys: []string{"t"}, desc: "triage: sort the inbox one by one", short: "sort",
+			run: func(m *model, _ *Item) tea.Cmd { return m.startTriage() }},
+		{keys: []string{" ", "space", "x", "enter"}, desc: "done / not done", short: "done", run: (*model).toggleItemDone},
+		{keys: []string{"e"}, desc: "edit text", run: func(m *model, it *Item) tea.Cmd {
+			if it == nil {
+				return nil
+			}
 			m.mode, m.editID = mText, it.ID
 			m.ti.SetValue(it.Text)
 			m.ti.CursorEnd()
-			return m, m.ti.Focus()
-		}
-	case "E":
-		if it != nil {
+			return m.ti.Focus()
+		}},
+		{keys: []string{"E"}, desc: "edit all details", run: func(m *model, it *Item) tea.Cmd {
+			if it == nil {
+				return nil
+			}
 			m.adding = false
-			return m, m.startAsk(*it, false, m.cfg.Ask)
-		}
-	case "d":
-		if it != nil {
-			m.mode = mConfirm
-		}
-	case " ", "space", "x", "enter":
-		if it != nil {
-			done := !it.Done
-			err := m.st.SetDone(it.ID, done)
-			m.refresh(it.ID)
-			if err != nil {
-				return m, plugin.Error(err)
+			return m.startAsk(*it, false, m.cfg.Ask)
+		}},
+		{keys: []string{"d"}, desc: "delete", run: func(m *model, it *Item) tea.Cmd {
+			if it != nil {
+				m.mode = mConfirm
 			}
-			if done {
-				return m, plugin.Notify("done: " + clip(it.Text, 40))
+			return nil
+		}},
+		{keys: []string{"/"}, desc: "filter (text, context or person)", short: "filter", run: func(m *model, _ *Item) tea.Cmd {
+			m.mode = mFilter
+			m.ti.SetValue(m.filter)
+			m.ti.CursorEnd()
+			return m.ti.Focus()
+		}},
+		{keys: []string{"H"}, desc: "show or hide done items", run: plain((*model).toggleDone)},
+		{keys: []string{keyPrev}, desc: "move todo to the previous / next quadrant", run: func(m *model, it *Item) tea.Cmd { return m.moveItem(it, -1) }},
+		{keys: []string{keyNext}, desc: "move todo to the previous / next quadrant", run: func(m *model, it *Item) tea.Cmd { return m.moveItem(it, 1) }},
+	}
+	for _, q := range gridOrderWithInbox() {
+		bs = append(bs, binding{keys: []string{paneKeys[q]}, desc: "jump to a quadrant (its key is in its title)",
+			run: func(m *model, it *Item) tea.Cmd { m.focus(q, it); return nil }})
+	}
+	const moveDesc = "move (within a quadrant in the grid)"
+	const sideDesc = "previous / next quadrant (beside it, in the grid)"
+	return append(bs,
+		binding{keys: []string{"j", "down"}, desc: moveDesc, run: plain(func(m *model) { m.move(1) })},
+		binding{keys: []string{"k", "up"}, desc: moveDesc, run: plain(func(m *model) { m.move(-1) })},
+		binding{keys: []string{"g", "home"}, desc: moveDesc, run: plain(func(m *model) { m.edge(false) })},
+		binding{keys: []string{"G", "end"}, desc: moveDesc, run: plain(func(m *model) { m.edge(true) })},
+		binding{keys: []string{"h", "left"}, desc: sideDesc, run: plain(func(m *model) { m.pane(-1, false) })},
+		binding{keys: []string{"l", "right"}, desc: sideDesc, run: plain(func(m *model) { m.pane(1, false) })},
+		binding{keys: []string{"tab"}, desc: "next quadrant", short: "quadrant", run: plain(func(m *model) { m.pane(1, true) })},
+		binding{keys: []string{"shift+tab"}, desc: "previous quadrant", run: plain(func(m *model) { m.pane(-1, true) })},
+		binding{keys: []string{"?"}, desc: "this help", short: "help", run: plain(func(m *model) { m.mode = mHelp })},
+		binding{keys: []string{"q", "esc"}, desc: "close (esc first clears the filter)", run: func(m *model, _ *Item) tea.Cmd {
+			if m.filter != "" {
+				m.filter = ""
+				m.refresh(m.selID())
+				return nil
 			}
-		}
-	case "0", "1", "2", "3", "4":
-		if it != nil {
-			c := *it
-			c.Quadrant = int(s[0] - '0')
-			err := m.st.Update(c)
-			m.refresh(it.ID)
-			return m, plugin.Error(err)
+			return plugin.Close()
+		}},
+	)
+}
+
+func gridOrderWithInbox() []int { return []int{QInbox, QDo, QSchedule, QDelegate, QDrop} }
+
+func (m *model) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := k.String()
+	for _, b := range listKeys {
+		for _, key := range b.keys {
+			if key == s {
+				return m, b.run(m, m.cur())
+			}
 		}
 	}
 	return m, nil
 }
+
+func (m *model) toggleItemDone(it *Item) tea.Cmd {
+	if it == nil {
+		return nil
+	}
+	done := !it.Done
+	q := it.Quadrant
+	err := m.st.SetDone(it.ID, done)
+	m.refresh(it.ID)
+	m.keepPane(q)
+	if err != nil {
+		return plugin.Error(err)
+	}
+	if done {
+		return plugin.Notify("done: " + clip(it.Text, 40))
+	}
+	return nil
+}
+
+// moveItem moves it d quadrants along (see stepQuadrant).
+func (m *model) moveItem(it *Item, d int) tea.Cmd {
+	if it == nil {
+		return nil
+	}
+	c := *it
+	c.Quadrant = stepQuadrant(c.Quadrant, d)
+	if c.Quadrant == it.Quadrant {
+		return nil
+	}
+	err := m.st.Update(c)
+	m.refresh(it.ID)
+	return plugin.Error(err)
+}
+
+// stepQuadrant is the quadrant d steps along inbox, do now, schedule,
+// delegate, drop (clamped at both ends).
+func stepQuadrant(q, d int) int { return min(max(q+d, QInbox), QDrop) }
 
 // ---- grid navigation ----
 //
@@ -292,6 +385,9 @@ func (m *model) span(q int) (lo, hi int) {
 }
 
 func (m *model) move(d int) {
+	if m.empty && m.gridOn() {
+		return
+	}
 	lo, hi := 0, len(m.vis)
 	if m.gridOn() && m.cur() != nil {
 		lo, hi = m.span(m.cur().Quadrant)
@@ -303,6 +399,9 @@ func (m *model) move(d int) {
 
 // edge goes to the first or last note of the pane (or of the whole list).
 func (m *model) edge(end bool) {
+	if m.empty && m.gridOn() {
+		return
+	}
 	lo, hi := 0, len(m.vis)
 	if m.gridOn() && m.cur() != nil {
 		lo, hi = m.span(m.cur().Quadrant)
@@ -319,29 +418,35 @@ func (m *model) edge(end bool) {
 // with no notes are skipped.
 func (m *model) pane(d int, cycle bool) {
 	it := m.cur()
-	if it == nil {
-		return
-	}
-	order := groupOrder
 	if m.gridOn() {
 		if !cycle {
-			p, ok := gridPartner[it.Quadrant]
+			p, ok := gridPartner[m.fq]
 			// h only leaves the right-hand pane, l the left-hand one
-			if ok && (p < it.Quadrant) == (d < 0) {
+			if ok && (p < m.fq) == (d < 0) {
 				m.focus(p, it)
 			}
 			return
 		}
-		order = gridOrder
+		i := 0
+		for j, q := range gridOrder {
+			if q == m.fq {
+				i = j
+			}
+		}
+		m.focus(gridOrder[((i+d)%len(gridOrder)+len(gridOrder))%len(gridOrder)], it)
+		return
+	}
+	if it == nil {
+		return
 	}
 	i := 0
-	for j, q := range order {
+	for j, q := range groupOrder {
 		if q == it.Quadrant {
 			i = j
 		}
 	}
-	for n := 1; n < len(order); n++ {
-		if m.focus(order[((i+d*n)%len(order)+len(order))%len(order)], it) {
+	for n := 1; n < len(groupOrder); n++ {
+		if m.focus(groupOrder[((i+d*n)%len(groupOrder)+len(groupOrder))%len(groupOrder)], it) {
 			return
 		}
 	}
@@ -350,12 +455,20 @@ func (m *model) pane(d int, cycle bool) {
 // focus selects the note in quadrant q on the same row as from (clamped);
 // false when q has no notes.
 func (m *model) focus(q int, from *Item) bool {
-	flo, _ := m.span(from.Quadrant)
-	row := m.sel - flo
+	row := 0
+	if from != nil {
+		flo, _ := m.span(from.Quadrant)
+		row = m.sel - flo
+	}
 	lo, hi := m.span(q)
 	if hi <= lo {
+		if m.gridOn() { // the grid shows empty panes too: focus is theirs to take
+			m.fq, m.empty = q, true
+			return true
+		}
 		return false
 	}
+	m.fq, m.empty = q, false
 	m.sel = lo + min(max(row, 0), hi-lo-1)
 	return true
 }
@@ -530,9 +643,15 @@ func (m *model) keyAsk(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	skip := s == "enter" || s == " " || s == "space" || s == "tab" || s == "s"
 	switch m.steps[m.step] {
 	case "quadrant":
-		if len(s) == 1 && s[0] >= '0' && s[0] <= '4' {
-			m.draft.Quadrant = int(s[0] - '0')
-			return m, m.advance()
+		for q, key := range paneKeys {
+			if s == key {
+				m.draft.Quadrant = q
+				return m, m.advance()
+			}
+		}
+		if s == keyPrev || s == keyNext {
+			m.draft.Quadrant = stepQuadrant(m.draft.Quadrant, map[string]int{keyPrev: -1, keyNext: 1}[s])
+			return m, nil
 		}
 		if skip {
 			return m, m.advance()
@@ -613,8 +732,14 @@ func (m *model) View() string {
 		return ""
 	}
 	var foot []string
+	m.ti.Width = max(m.w-12, 5)
+	askModal := m.mode == mAsk && m.w >= 20 && m.h >= 9
+	modal := m.mode == mText && m.editID == 0 && m.w >= 20 && m.h >= 8
 	switch m.mode {
 	case mText:
+		if modal {
+			break
+		}
 		label := "+ "
 		hint := m.hint
 		if m.editID != 0 {
@@ -628,7 +753,11 @@ func (m *model) View() string {
 		}
 		foot = []string{m.muted.Render(hint), m.accent.Render(label) + m.ti.View()}
 	case mAsk:
-		foot = m.askFooter()
+		if askModal {
+			break
+		}
+		title, q, hint := m.askRows()
+		foot = append([]string{title, hint}, q...)
 	case mFilter:
 		foot = []string{m.accent.Render("/ ") + m.ti.View()}
 	case mConfirm:
@@ -648,7 +777,13 @@ func (m *model) View() string {
 	for len(lines) < bh {
 		lines = append(lines, "")
 	}
-	out := append([]string{m.header()}, lines[:bh]...)
+	lines = lines[:bh]
+	if modal {
+		lines = m.overlay(lines, m.addModal())
+	} else if askModal {
+		lines = m.overlay(lines, m.askModal())
+	}
+	out := append([]string{m.header()}, lines...)
 	out = append(out, foot...)
 	for len(out) < m.h {
 		out = append(out, "")
@@ -677,41 +812,45 @@ func (m *model) header() string {
 	return s
 }
 
-func (m *model) askFooter() []string {
-	title := clip(m.draft.Text, m.w-14)
+// askRows is the prompt for the current question: the todo, the question and a hint.
+func (m *model) askRows() (title string, q []string, hint string) {
+	title = clip(m.draft.Text, m.w-14)
 	if m.triage != nil {
 		title = m.muted.Render(fmt.Sprintf("sort %d/%d  ", m.tpos+1, len(m.triage))) + title
 	}
-	hint := m.muted.Render("enter skip · esc done")
+	hint = m.muted.Render("enter skip · esc done")
 	if m.hintErr {
 		hint = m.errc.Render(m.hint)
 	}
-	var q string
 	switch m.steps[max(m.step, 0)] {
 	case "quadrant":
-		var p []string
-		for i := QDo; i <= QDrop; i++ {
-			p = append(p, fmt.Sprintf("%d %s", i, quadrantNames[i]))
+		// the options laid out like the matrix: do now, schedule / delegate, drop
+		opt := func(i int) string {
+			c := paneKeys[i] + " " + quadrantNames[i]
+			if i == m.draft.Quadrant {
+				return m.accent.Render(c) + strings.Repeat(" ", max(14-len(c), 0))
+			}
+			return c + strings.Repeat(" ", max(14-len(c), 0))
 		}
-		q = m.accent.Render("Priority? ") + strings.Join(p, " · ")
-		if m.triage != nil && !m.hintErr {
-			hint = m.muted.Render("1 urgent+important · 2 important · 3 urgent · 4 neither · s skip")
+		q = []string{m.accent.Render("Priority?"), opt(QDo) + opt(QSchedule), opt(QDelegate) + opt(QDrop)}
+		if !m.hintErr {
+			hint = m.muted.Render(paneKeys[QInbox] + " inbox · " + keyPrev + " " + keyNext + " change · enter keep · s skip")
 		}
 	case "context":
 		var p []string
 		for i, c := range m.cfg.Contexts {
 			p = append(p, fmt.Sprintf("%d %s", i+1, c))
 		}
-		q = m.accent.Render("Context? ") + strings.Join(p, " · ")
+		q = []string{m.accent.Render("Context? ") + strings.Join(p, " · ")}
 	case "who":
-		q = m.accent.Render("Who? ") + m.ti.View()
+		q = []string{m.accent.Render("Who? ") + m.ti.View()}
 	case "due":
-		q = m.accent.Render("Due? ") + m.ti.View()
+		q = []string{m.accent.Render("Due? ") + m.ti.View()}
 		if !m.hintErr {
 			hint = m.muted.Render("today · tom · fri · +3 · 12-24 · enter skip")
 		}
 	}
-	return []string{title, hint, q}
+	return title, q, hint
 }
 
 func (m *model) bodyLines(bh int) []string {
@@ -808,23 +947,18 @@ func (m *model) row(it *Item, selected bool, w int) string {
 }
 
 func (m *model) helpLines() []string {
-	rows := [][2]string{
-		{"a", "add (enter saves and keeps going; tab asks details)"},
-		{"t", "triage: sort the inbox one by one"},
-		{"0-4", "priority: 1 do now, 2 schedule, 3 delegate, 4 drop, 0 inbox"},
-		{"space", "done / not done"},
-		{"e / E", "edit text / edit all details"},
-		{"d", "delete"},
-		{"/", "filter (text, context or person)"},
-		{"H", "show or hide done items"},
-		{"j k g G", "move (within a quadrant in the grid)"},
-		{"h l", "previous / next quadrant (beside it, in the grid)"},
-		{"tab", "next quadrant (shift+tab: previous)"},
-		{"q esc", "close"},
+	type row struct{ keys, desc string }
+	var rows []row
+	for _, b := range listKeys {
+		if n := len(rows); n > 0 && rows[n-1].desc == b.desc {
+			rows[n-1].keys += " " + b.label()
+			continue
+		}
+		rows = append(rows, row{b.label(), b.desc})
 	}
 	out := []string{m.accent.Render("Keys"), ""}
 	for _, r := range rows {
-		out = append(out, "  "+m.accent.Render(fmt.Sprintf("%-8s", r[0]))+" "+r[1])
+		out = append(out, "  "+m.accent.Render(fmt.Sprintf("%-10s", r.keys))+" "+r.desc)
 	}
 	return append(out, "", m.muted.Render("  Everything is optional: add text now, sort later."))
 }
@@ -844,8 +978,13 @@ func (m *model) Help() []plugin.KeyHelp {
 	case mConfirm:
 		return []plugin.KeyHelp{{Key: "y", Desc: "delete"}, {Key: "n", Desc: "cancel"}}
 	}
-	return []plugin.KeyHelp{{Key: "a", Desc: "add"}, {Key: "t", Desc: "sort"}, {Key: "space", Desc: "done"},
-		{Key: "tab", Desc: "quadrant"}, {Key: "/", Desc: "filter"}, {Key: "?", Desc: "help"}}
+	var hs []plugin.KeyHelp
+	for _, b := range listKeys {
+		if b.short != "" {
+			hs = append(hs, plugin.KeyHelp{Key: b.label(), Desc: b.short})
+		}
+	}
+	return hs
 }
 
 func (m *model) Commands() []plugin.Command {
@@ -859,21 +998,17 @@ func (m *model) Commands() []plugin.Command {
 // ---- grid view ----
 
 // gridLines draws the four quadrants as a 2x2 matrix of bordered panes
-// (do now, schedule / delegate, drop) with the inbox as a strip below, in a
-// body bh rows tall. The caller has checked gridFits.
+// (do now, schedule / delegate, drop) of equal size with the inbox as a strip
+// on top, in a body bh rows tall. The caller has checked gridFits.
 func (m *model) gridLines(bh int) []string {
-	focus := QInbox
-	if it := m.cur(); it != nil {
-		focus = it.Quadrant
-	}
+	focus := m.fq
 	strip := 2 + min(max(m.count(QInbox), 1), 3)
+	// the four quadrants share what is left equally (an odd row goes to the top band)
 	rest := bh - strip
-	// the bottom band is as tall as its fuller pane needs (at most half),
-	// so the more important top band gets the rest
-	bottom := min(rest/2, max(minPaneH, 2+max(m.count(QDelegate), m.count(QDrop))))
+	bottom := rest / 2
 	top := rest - bottom
 	lw, rw := (m.w+1)/2, m.w/2
-	var out []string
+	out := m.pane1(QInbox, m.w, strip, focus == QInbox)
 	for _, band := range []struct{ l, r, h int }{{QDo, QSchedule, top}, {QDelegate, QDrop, bottom}} {
 		left := m.pane1(band.l, lw, band.h, focus == band.l)
 		right := m.pane1(band.r, rw, band.h, focus == band.r)
@@ -881,7 +1016,7 @@ func (m *model) gridLines(bh int) []string {
 			out = append(out, left[i]+right[i])
 		}
 	}
-	return append(out, m.pane1(QInbox, m.w, strip, focus == QInbox)...)
+	return out
 }
 
 // count is how many visible notes are in quadrant q.
@@ -904,14 +1039,14 @@ func (m *model) pane1(q, w, h int, focused bool) []string {
 	}
 	inner := h - 2
 	off := min(m.poff[q], max(n-inner, 0))
-	if focused {
+	if focused && n > 0 {
 		sel := m.sel - lo
 		off = min(max(off, sel-inner+1), sel)
 	}
 	off = max(off, 0)
 	m.poff[q] = off
 
-	title := m.accent.Render(quadrantNames[q]) + m.muted.Render(fmt.Sprintf(" %d", n))
+	title := m.muted.Render(paneKeys[q]+" ") + m.accent.Render(quadrantNames[q])
 	if hint := quadrantHints[q]; hint != "" && w >= 44 {
 		title += m.muted.Render(" · " + hint)
 	}
@@ -942,4 +1077,62 @@ func (m *model) pane1(q, w, h int, focused bool) []string {
 		fw = ansi.StringWidth(foot)
 	}
 	return append(out, bs.Render("╰"+dashes(w-2-fw))+m.muted.Render(foot)+bs.Render("╯"))
+}
+
+// ---- add modal ----
+
+// modalWidth is the width of the modal boxes.
+func (m *model) modalWidth() int { return min(m.w-4, 60) }
+
+// box draws a bordered modal w wide with a title in its top edge.
+func (m *model) box(w int, title string, rows ...string) []string {
+	dashes := func(n int) string { return strings.Repeat("─", max(n, 0)) }
+	line := func(s string) string {
+		s = ansi.Truncate(s, w-4, "…")
+		return m.accent.Render("│") + " " + s + strings.Repeat(" ", max(w-4-ansi.StringWidth(s), 0)) + " " + m.accent.Render("│")
+	}
+	out := []string{m.accent.Render("╭─ " + title + " " + dashes(w-5-ansi.StringWidth(title)) + "╮")}
+	for _, r := range rows {
+		out = append(out, line(r))
+	}
+	return append(out, m.accent.Render("╰"+dashes(w-2)+"╯"))
+}
+
+// addModal is the box the new-todo prompt is typed into.
+func (m *model) addModal() []string {
+	w := m.modalWidth()
+	m.ti.Width = max(w-5, 1)
+	hint := m.hint
+	if hint == "" {
+		hint = "enter save · tab add details · esc done"
+	}
+	return m.box(w, "New todo", m.ti.View(), m.muted.Render(hint))
+}
+
+// askModal is the box for sorting a todo (triage) and asking its details.
+func (m *model) askModal() []string {
+	w := m.modalWidth()
+	m.ti.Width = max(w-14, 1)
+	title := "Details"
+	if m.triage != nil {
+		title = fmt.Sprintf("Sort %d/%d", m.tpos+1, len(m.triage))
+	}
+	_, q, hint := m.askRows()
+	return m.box(w, title, append(append([]string{m.accent.Render(clip(m.draft.Text, w-4)), ""}, q...), hint)...)
+}
+
+// overlay draws box centred over the body lines (padded with blanks as needed).
+func (m *model) overlay(lines, box []string) []string {
+	bw := ansi.StringWidth(box[0])
+	x, y := (m.w-bw)/2, max((len(lines)-len(box))/2, 0)
+	out := append([]string(nil), lines...)
+	for len(out) < y+len(box) {
+		out = append(out, "")
+	}
+	for i, b := range box {
+		bg := out[y+i]
+		pad := strings.Repeat(" ", max(x-ansi.StringWidth(bg), 0))
+		out[y+i] = ansi.Truncate(bg+pad, x, "") + b + ansi.TruncateLeft(bg, x+bw, "")
+	}
+	return out
 }
