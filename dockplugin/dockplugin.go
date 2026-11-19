@@ -20,7 +20,7 @@ type Plugin struct{}
 
 func (Plugin) Manifest() plugin.Manifest {
 	return plugin.Manifest{
-		ID: "lazytodo", Name: "Todo", Version: "0.3.0",
+		ID: "lazytodo", Name: "Todo", Version: "0.3.1",
 		Description: "Quick todo capture; sort by priority, person and due date only when you want to",
 		Display:     plugin.DisplayTile, Lifecycle: plugin.Persistent,
 		MinWidth: 34, MinHeight: 9,
