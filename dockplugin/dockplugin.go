@@ -47,7 +47,7 @@ func (Plugin) Summary(ctx plugin.Context) (plugin.Summary, error) {
 // summarize builds the home block: the four quadrants as a 2x2 matrix in
 // the order of the 1-4 keys (do now, schedule / delegate, drop), each cell
 // listing its open notes in the order the list shows them (due date, then
-// age; three rows for the top band, two for the bottom), and the unsorted inbox as a line below. Lines is the compact text
+// age; both bands are the same height), with the unsorted inbox as a line above them. Lines is the compact text
 // version for narrow or short terminals.
 func summarize(st *Store, now time.Time) plugin.Summary {
 	c := st.Counts()
@@ -82,10 +82,8 @@ func summarize(st *Store, now time.Time) plugin.Summary {
 	if n := notes[QDo]; len(n) > 0 {
 		s.Lines = append(s.Lines, "next: "+n[0])
 	}
-	s.Widgets = []plugin.Widget{
-		plugin.Columns(3, cell(QDo), cell(QSchedule)), // 4+3+1 rows: the whole budget
-		plugin.Columns(2, cell(QDelegate), cell(QDrop)),
-	}
+	// the unsorted inbox comes first, then two equally tall bands of two
+	// quadrants each (1+2 rows apiece, plus the inbox line: 7 of the budget)
 	if c[QInbox] > 0 || overdue > 0 {
 		tail := fmt.Sprintf("%d to sort", c[QInbox])
 		l := plugin.LevelNone
@@ -95,6 +93,10 @@ func summarize(st *Store, now time.Time) plugin.Summary {
 		}
 		s.Widgets = append(s.Widgets, plugin.Text(tail, l))
 	}
+	s.Widgets = append(s.Widgets,
+		plugin.Columns(2, cell(QDo), cell(QSchedule)),
+		plugin.Columns(2, cell(QDelegate), cell(QDrop)),
+	)
 	if overdue > 0 {
 		s.Level = plugin.LevelWarn
 	}

@@ -137,7 +137,7 @@ func TestSummaryMatrix(t *testing.T) {
 	if s.Level != plugin.LevelWarn || len(s.Widgets) != 3 {
 		t.Fatalf("%+v", s)
 	}
-	top, bottom := s.Widgets[0], s.Widgets[1]
+	top, bottom := s.Widgets[1], s.Widgets[2]
 	do, sched, del, drop := top.Cells[0], top.Cells[1], bottom.Cells[0], bottom.Cells[1]
 	if do.Title != "Do now" || sched.Title != "Schedule" || del.Title != "Delegate" || drop.Title != "Drop" {
 		t.Fatalf("quadrant order: %v %v %v %v", do.Title, sched.Title, del.Title, drop.Title)
@@ -149,7 +149,10 @@ func TestSummaryMatrix(t *testing.T) {
 	if sched.Count != 1 || sched.Level != plugin.LevelNone || del.Count != 0 || len(del.Lines) != 0 || drop.Lines[0] != "later" {
 		t.Errorf("cells: %+v %+v %+v", sched, del, drop)
 	}
-	if tail := s.Widgets[2]; tail.Kind != plugin.KindText || tail.Text != "1 to sort · 1 overdue" || tail.Level != plugin.LevelWarn {
+	if top.Height != bottom.Height {
+		t.Errorf("bands differ in height: %d vs %d", top.Height, bottom.Height)
+	}
+	if tail := s.Widgets[0]; tail.Kind != plugin.KindText || tail.Text != "1 to sort · 1 overdue" || tail.Level != plugin.LevelWarn {
 		t.Errorf("tail: %+v", tail)
 	}
 	want := []string{"4 do now · 1 to sort · 1 overdue", "1 schedule · 0 delegate · 1 drop", "next: ! late"}
@@ -159,14 +162,14 @@ func TestSummaryMatrix(t *testing.T) {
 	// what the host sees: note text is user data, so Clean must keep it safe
 	m.st.Add(Item{Text: "\x1b[31mred\x07" + strings.Repeat("x", 500), Quadrant: QDelegate})
 	c := summarize(m.st, day).Clean()
-	if n := c.Widgets[1].Cells[0].Lines[0]; strings.ContainsAny(n, "\x1b\x07") || len([]rune(n)) != plugin.MaxWidgetLabel {
+	if n := c.Widgets[2].Cells[0].Lines[0]; strings.ContainsAny(n, "\x1b\x07") || len([]rune(n)) != plugin.MaxWidgetLabel {
 		t.Errorf("note not cleaned: %q", n)
 	}
 	rows := 0
 	for _, w := range c.Widgets {
 		rows += w.Rows()
 	}
-	if rows != plugin.MaxSummaryRows || len(c.Widgets) != 3 {
+	if rows != 7 || rows > plugin.MaxSummaryRows || len(c.Widgets) != 3 { // inbox line + two bands of 1+2
 		t.Errorf("%d rows", rows)
 	}
 }
